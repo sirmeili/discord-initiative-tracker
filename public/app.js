@@ -91,71 +91,107 @@ function sendDiscordHandshake() {
 sendDiscordHandshake();
 
 // ============================================================================
-// 2. Port-443 Pub/Sub Relay Client (Works inside Discord URL Mappings & Mobile Data!)
+// 2. Firebase Realtime Database Sync Client (Port-443 HTTPS + Live EventSource Stream)
+//    - Unlimited messages & persistent room state on Firebase's Free Spark Tier!
+//    - Works through Discord URL Mappings (/sync -> dnd-tracker-96a9b-default-rtdb.firebaseio.com)
 // ============================================================================
-class RealtimeRelayClient {
-  constructor(roomCode, onMessageCallback, onConnectCallback) {
-    this.roomTopic = `dnd_init_tracker_v2_${roomCode.replace(/[^a-zA-Z0-9_-]/g, '_')}`;
-    this.onMessageCallback = onMessageCallback;
+const FIREBASE_DB_HOST = 'dnd-tracker-96a9b-default-rtdb.firebaseio.com';
+
+class FirebaseRoomClient {
+  constructor(roomCode, onStateCallback, onConnectCallback) {
+    this.roomKey = roomCode.replace(/[^a-zA-Z0-9_-]/g, '_');
+    this.onStateCallback = onStateCallback;
     this.onConnectCallback = onConnectCallback;
-    this.ws = null;
-    this.connected = false;
+    this.evtSource = null;
+    this.pollTimer = null;
     this.closedIntentionally = false;
 
     const isDiscordProxy = window.location.hostname.endsWith('.discordsays.com');
-    // When inside Discord Activity, route through /sync URL Mapping -> ntfy.sh (standard port 443!)
-    this.baseHttpUrl = isDiscordProxy ? `https://${window.location.host}/sync` : 'https://ntfy.sh';
-    this.baseWsUrl = isDiscordProxy ? `wss://${window.location.host}/sync` : 'wss://ntfy.sh';
+    this.baseUrl = isDiscordProxy
+      ? `https://${window.location.host}/sync`
+      : `https://${FIREBASE_DB_HOST}`;
+    this.roomUrl = `${this.baseUrl}/rooms/${this.roomKey}.json`;
 
     this.connect();
   }
 
-  connect() {
+  async connect() {
     if (this.closedIntentionally) return;
-    try {
-      this.ws = new WebSocket(`${this.baseWsUrl}/${this.roomTopic}/ws`);
-    } catch {
-      return;
-    }
 
-    this.ws.onopen = () => {
-      this.connected = true;
-      if (this.onConnectCallback) this.onConnectCallback();
-    };
+    // 1. Fetch initial saved room state from Firebase immediately
+    await this.fetchLatestState();
+    if (this.onConnectCallback) this.onConnectCallback();
 
-    this.ws.onmessage = (evt) => {
+    // 2. Open live Server-Sent Events (SSE) stream from Firebase for instant push updates
+    if (typeof EventSource !== 'undefined') {
       try {
-        const wrapper = JSON.parse(evt.data);
-        if (wrapper && wrapper.event === 'message' && wrapper.message) {
-          this.onMessageCallback(wrapper.message);
-        }
-      } catch {}
-    };
-
-    this.ws.onclose = () => {
-      this.connected = false;
-      if (!this.closedIntentionally) {
-        setTimeout(() => this.connect(), 3000);
+        this.evtSource = new EventSource(this.roomUrl);
+        this.evtSource.addEventListener('put', (e) => {
+          try {
+            const packet = JSON.parse(e.data);
+            if (packet && packet.path === '/' && packet.data) {
+              this.onStateCallback(packet.data);
+            } else {
+              this.fetchLatestState();
+            }
+          } catch {}
+        });
+        this.evtSource.onerror = () => {
+          // Fallback polling ensures sync even if a proxy buffers SSE
+          this.startFallbackPolling();
+        };
+      } catch {
+        this.startFallbackPolling();
       }
-    };
+    } else {
+      this.startFallbackPolling();
+    }
   }
 
-  async publish(messageStr) {
+  startFallbackPolling() {
+    if (this.pollTimer || this.closedIntentionally) return;
+    this.pollTimer = setInterval(() => this.fetchLatestState(), 1500);
+  }
+
+  async fetchLatestState() {
+    if (this.closedIntentionally) return;
     try {
-      await fetch(`${this.baseHttpUrl}/${this.roomTopic}`, {
-        method: 'POST',
-        body: messageStr
+      const res = await fetch(`${this.roomUrl}?_t=${Date.now()}`);
+      if (!res.ok) return;
+      const data = await res.json();
+      if (data) {
+        this.onStateCallback(data);
+      }
+    } catch {}
+  }
+
+  async saveRoomState(roomObj, lastEventObj) {
+    try {
+      const payload = {
+        state: roomObj,
+        lastEvent: lastEventObj || null,
+        updatedAt: Date.now(),
+        updatedBy: appState.userId
+      };
+      await fetch(this.roomUrl, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
       });
     } catch (err) {
-      console.warn('Relay publish warning:', err);
+      console.warn('Firebase save warning:', err);
     }
   }
 
   close() {
     this.closedIntentionally = true;
-    if (this.ws) {
-      this.ws.onclose = null;
-      this.ws.close();
+    if (this.evtSource) {
+      this.evtSource.close();
+      this.evtSource = null;
+    }
+    if (this.pollTimer) {
+      clearInterval(this.pollTimer);
+      this.pollTimer = null;
     }
   }
 }
@@ -653,98 +689,75 @@ function connectCloudRelay(alsoUsingLocalWs = false) {
   }
 
   if (!alsoUsingLocalWs && badge) {
-    badge.textContent = `Connecting Internet Sync • Table: ${currentRoomId}...`;
+    badge.textContent = `Connecting Firebase Sync • Table: ${currentRoomId}...`;
   }
   if (syncBadge) {
     syncBadge.textContent = `⏳ Connecting: ${currentRoomId}`;
   }
 
-  relayClient = new RealtimeRelayClient(
+  relayClient = new FirebaseRoomClient(
     currentRoomId,
-    (rawText) => {
-      try {
-        const msg = JSON.parse(rawText);
-        handleIncomingMessage(msg);
-      } catch {}
+    (firebasePayload) => {
+      if (!firebasePayload || !firebasePayload.state) return;
+      const incomingRoom = firebasePayload.state;
+      // Adopt incoming Firebase state
+      appState.room = {
+        ...createEmptyRoom(currentRoomId),
+        ...incomingRoom,
+        combatants: (incomingRoom.combatants || []).map((c) => ({
+          ...c,
+          conditions: c.conditions || []
+        }))
+      };
+      const { activeCombatant, onDeckCombatant } = getTurnOrderContext(appState.room);
+      appState.activeCombatantId = activeCombatant?.id || null;
+      appState.onDeckCombatantId = onDeckCombatant?.id || null;
+      renderUI();
+
+      if (firebasePayload.lastEvent) {
+        handleRoomEvent(firebasePayload.lastEvent);
+      }
     },
     () => {
       if (!alsoUsingLocalWs) {
         appState.syncMode = 'cloud-relay';
         if (badge) {
-          badge.textContent = `🌐 Internet Sync LIVE • Table: ${currentRoomId}`;
+          badge.textContent = `🔥 Firebase Live Sync • Table: ${currentRoomId}`;
         }
       }
       if (syncBadge) {
-        syncBadge.textContent = `🌐 Live Table: ${currentRoomId}`;
+        syncBadge.textContent = `🔥 Live Table: ${currentRoomId}`;
         syncBadge.style.color = '#4cd964';
       }
-      // Ask existing table members (or DM) for the current combat snapshot
-      publishToPeers({ type: 'REQUEST_SYNC', senderId: appState.userId });
     }
   );
 }
 
-function publishToPeers(payload) {
-  const actionId = payload.actionId || `${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
-  const fullPayload = {
-    ...payload,
-    actionId,
-    roomId: currentRoomId,
-    senderId: appState.userId
-  };
-  processedActionIds.add(actionId);
-
+function publishToPeers(payload, lastEventObj = null) {
   if (relayClient) {
-    relayClient.publish(JSON.stringify(fullPayload));
+    relayClient.saveRoomState(appState.room, lastEventObj);
   }
   if (localBroadcast) {
     try {
-      localBroadcast.postMessage(fullPayload);
+      localBroadcast.postMessage({
+        type: 'FIREBASE_LOCAL_MIRROR',
+        roomId: currentRoomId,
+        state: appState.room,
+        lastEvent: lastEventObj
+      });
     } catch {}
   }
 }
 
 function handleIncomingMessage(msg) {
   if (!msg || msg.roomId !== currentRoomId) return;
-
-  if (msg.type === 'REQUEST_SYNC') {
-    if (msg.senderId !== appState.userId && appState.room.combatants.length > 0) {
-      const isDM = appState.role === 'dm' || appState.room.dmUserId === appState.userId;
-      setTimeout(() => {
-        publishToPeers({
-          type: 'SYNC_SNAPSHOT',
-          state: appState.room
-        });
-      }, isDM ? 80 : 350);
-    }
-    return;
-  }
-
-  if (msg.type === 'SYNC_SNAPSHOT') {
-    if (
-      msg.state &&
-      (appState.room.combatants.length === 0 ||
-        (msg.state.updatedAt || 0) > (appState.room.updatedAt || 0))
-    ) {
-      appState.room = msg.state;
-      const { activeCombatant, onDeckCombatant } = getTurnOrderContext(appState.room);
-      appState.activeCombatantId = activeCombatant?.id || null;
-      appState.onDeckCombatantId = onDeckCombatant?.id || null;
-      renderUI();
-    }
-    return;
-  }
-
-  if (msg.actionId && processedActionIds.has(msg.actionId)) return;
-  if (msg.actionId) processedActionIds.add(msg.actionId);
-
-  if (appState.syncMode !== 'local-ws') {
-    const evt = applyActionToRoom(appState.room, msg);
+  if (msg.type === 'FIREBASE_LOCAL_MIRROR' && msg.state) {
+    appState.room = msg.state;
     const { activeCombatant, onDeckCombatant } = getTurnOrderContext(appState.room);
     appState.activeCombatantId = activeCombatant?.id || null;
     appState.onDeckCombatantId = onDeckCombatant?.id || null;
     renderUI();
-    if (evt) handleRoomEvent(evt);
+    if (msg.lastEvent) handleRoomEvent(msg.lastEvent);
   }
 }
 
@@ -765,16 +778,17 @@ function sendAction(payload) {
     localWs.send(JSON.stringify(stamped));
   }
 
-  if (appState.syncMode !== 'local-ws') {
-    const evt = applyActionToRoom(appState.room, stamped);
-    const { activeCombatant, onDeckCombatant } = getTurnOrderContext(appState.room);
-    appState.activeCombatantId = activeCombatant?.id || null;
-    appState.onDeckCombatantId = onDeckCombatant?.id || null;
-    renderUI();
-    if (evt) handleRoomEvent(evt);
+  const evt = applyActionToRoom(appState.room, stamped);
+  const { activeCombatant, onDeckCombatant } = getTurnOrderContext(appState.room);
+  appState.activeCombatantId = activeCombatant?.id || null;
+  appState.onDeckCombatantId = onDeckCombatant?.id || null;
+  renderUI();
+  if (evt) {
+    evt.timestamp = evt.timestamp || Date.now();
+    handleRoomEvent(evt);
   }
 
-  publishToPeers(stamped);
+  publishToPeers(stamped, evt);
 }
 
 // ============================================================================
