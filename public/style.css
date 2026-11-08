@@ -819,3 +819,155 @@ input:focus {
   from { transform: translateX(40px); opacity: 0; }
   to { transform: translateX(0); opacity: 1; }
 }
+
+/* ============================================================================
+   Discord Minimized Picture-in-Picture (PiP) Mode
+   Automatically activates when Discord shrinks the iframe into a corner widget
+   ============================================================================ */
+.pip-hud {
+  display: none;
+}
+
+@media (max-height: 340px), (max-width: 440px) {
+  body {
+    overflow: hidden !important;
+    min-height: 100vh;
+    height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 8px;
+  }
+
+  /* Hide the full desktop app shell & modals when minimized to PiP */
+  .app-shell,
+  .modal-backdrop,
+  .toast-container {
+    display: none !important;
+  }
+
+  .pip-hud {
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    width: 100%;
+    height: 100%;
+    background: linear-gradient(135deg, rgba(28, 32, 50, 0.96), rgba(14, 16, 26, 0.98));
+    border: 1.5px solid var(--border-subtle);
+    border-radius: 12px;
+    padding: 10px 14px;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
+  }
+
+  body.my-active-turn .pip-hud {
+    border-color: var(--gold);
+    background: linear-gradient(135deg, rgba(58, 43, 15, 0.95), rgba(18, 20, 32, 0.98));
+    box-shadow: 0 0 25px rgba(245, 185, 66, 0.45);
+  }
+
+  .pip-top-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .pip-badge {
+    font-size: 0.7rem;
+    font-weight: 700;
+    padding: 2px 8px;
+    border-radius: 99px;
+    background: rgba(224, 62, 82, 0.2);
+    color: #ff8594;
+    border: 1px solid rgba(224, 62, 82, 0.4);
+  }
+
+  .pip-turn-pill {
+    font-size: 0.7rem;
+    font-weight: 800;
+    padding: 2px 9px;
+    border-radius: 99px;
+    background: var(--gold);
+    color: #111;
+    letter-spacing: 0.04em;
+    animation: popScale 0.3s ease-out;
+  }
+
+  .pip-main-box {
+    margin: auto 0;
+    text-align: left;
+  }
+
+  .pip-label {
+    font-size: 0.64rem;
+    font-weight: 700;
+    letter-spacing: 0.1em;
+    color: var(--gold);
+    text-transform: uppercase;
+    margin-bottom: 2px;
+  }
+
+  .pip-active-name {
+    font-family: 'Cinzel', serif;
+    font-size: 1.25rem;
+    font-weight: 800;
+    color: #fff;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .pip-Bottom-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 8px;
+    border-top: 1px solid rgba(255, 255, 255, 0.08);
+    padding-top: 6px;
+  }
+
+  .pip-ondeck {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 0.78rem;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+
+  .pip-ondeck-label {
+    font-size: 0.65rem;
+    font-weight: 700;
+    color: var(--cyan);
+    letter-spacing: 0.06em;
+  }
+
+  /* Scale down the full-screen turn alert overlay so it fits inside PiP if triggered while minimized */
+  .turn-overlay-card {
+    padding: 14px 16px;
+    max-width: 95%;
+    border-radius: 12px;
+  }
+
+  .turn-overlay-badge {
+    font-size: 0.68rem;
+    padding: 3px 10px;
+    margin-bottom: 4px;
+  }
+
+  .turn-overlay-card h1 {
+    font-size: 1.15rem;
+    margin-bottom: 4px;
+  }
+
+  .turn-overlay-card p {
+    font-size: 0.75rem;
+    margin-bottom: 10px;
+  }
+
+  .turn-overlay-card .btn-lg {
+    padding: 6px 12px;
+    font-size: 0.8rem;
+  }
+}

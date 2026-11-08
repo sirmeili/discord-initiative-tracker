@@ -899,6 +899,35 @@ function renderUI() {
     onDeckNameEl.textContent = '—';
   }
 
+  // Update Compact PiP Mini-HUD (for when Discord minimizes the Activity window)
+  const pipRoundBadge = document.getElementById('pip-round-badge');
+  const pipYourTurnPill = document.getElementById('pip-your-turn-pill');
+  const pipStatusLabel = document.getElementById('pip-status-label');
+  const pipActiveName = document.getElementById('pip-active-name');
+  const pipOnDeckName = document.getElementById('pip-ondeck-name');
+  const pipNextBtn = document.getElementById('pip-next-turn-btn');
+
+  if (pipRoundBadge) {
+    pipRoundBadge.textContent = room.combatStarted ? `⚔️ Round ${room.round}` : '🎲 Lobby';
+  }
+  if (pipYourTurnPill) {
+    pipYourTurnPill.classList.toggle('hidden', !isMyTurnNow);
+  }
+  if (pipNextBtn) {
+    pipNextBtn.classList.toggle('hidden', !isDM);
+  }
+  if (pipActiveName && pipStatusLabel && pipOnDeckName) {
+    if (room.combatStarted && activeCombatant) {
+      pipStatusLabel.textContent = isMyTurnNow ? 'ACT NOW!' : 'CURRENT ACTIVE TURN';
+      pipActiveName.textContent = `${activeCombatant.name} (Init ${activeCombatant.initiative ?? '—'})`;
+      pipOnDeckName.textContent = onDeckCombatant ? onDeckCombatant.name : '—';
+    } else {
+      pipStatusLabel.textContent = 'PRE-COMBAT LOBBY';
+      pipActiveName.textContent = `${room.combatants.length} Adventurer(s) Ready`;
+      pipOnDeckName.textContent = 'Waiting for DM...';
+    }
+  }
+
   const listEl = document.getElementById('combatant-list');
   if (room.combatants.length === 0) {
     listEl.innerHTML = `
@@ -1144,6 +1173,13 @@ window.addEventListener('DOMContentLoaded', () => {
   document.getElementById('next-turn-btn').addEventListener('click', () => {
     sendAction({ type: 'NEXT_TURN' });
   });
+
+  const pipNextBtn = document.getElementById('pip-next-turn-btn');
+  if (pipNextBtn) {
+    pipNextBtn.addEventListener('click', () => {
+      sendAction({ type: 'NEXT_TURN' });
+    });
+  }
 
   document.getElementById('prev-turn-btn').addEventListener('click', () => {
     sendAction({ type: 'PREV_TURN' });
