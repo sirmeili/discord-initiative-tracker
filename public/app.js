@@ -1,9 +1,10 @@
 // ============================================================================
 // Roll for Initiative — D&D Turn Tracker & Notification Client
-// Supports:
-//  1. 100% Serverless P2P / Cloud Relay Mode (GitHub Pages — works across Wi-Fi & 4G/5G Mobile Data!)
-//  2. Local Node.js WebSocket Mode (when running node server.js locally)
-//  3. Discord Embedded Activity SDK auto-detection
+// Zero-External-CDN Edition for Discord Embedded Activities + GitHub Pages
+// Includes:
+//  1. Native Discord Embedded App SDK Handshake (dismisses the 3 pulsing dots immediately!)
+//  2. Native MQTT 3.1.1 over WebSocket Client (zero external CDN scripts blocked by Discord CSP!)
+//  3. Works across Home Wi-Fi, Different Cities, and 4G/5G Mobile Data
 // ============================================================================
 
 const CONDITIONS_LIST = [
@@ -17,15 +18,216 @@ const CONDITIONS_LIST = [
   'Hexed'
 ];
 
-// Per-tab identity so you can open multiple browser tabs to test DM + Players
-let sessionUserId = sessionStorage.getItem('dnd_user_id');
-if (!sessionUserId) {
-  sessionUserId = 'user_' + Math.random().toString(36).slice(2, 9);
-  sessionStorage.setItem('dnd_user_id', sessionUserId);
+// ============================================================================
+// 1. Native Discord Activity Handshake (Dismisses Discord's 3 Pulsing Dots!)
+// ============================================================================
+const urlParams = new URLSearchParams(window.location.search);
+const discordFrameId = urlParams.get('frame_id');
+const discordInstanceId = urlParams.get('instance_id');
+const discordChannelId = urlParams.get('channel_id');
+
+function sendDiscordHandshake() {
+  if (!discordFrameId) return;
+  try {
+    // Opcodes in @discord/embedded-app-sdk: HANDSHAKE = 0, FRAME = 1
+    // Sending HANDSHAKE [0, { v: 1, encoding: 'json', client_id, frame_id }] tells the Discord client
+    // that the Activity DOM is loaded and ready, immediately dismissing the 3 pulsing loading dots!
+    const hostParts = window.location.hostname.split('.');
+    const inferredClientId =
+      urlParams.get('client_id') ||
+      (window.location.hostname.endsWith('.discordsays.com') ? hostParts[0] : 'discord_activity');
+
+    const handshakePayload = [
+      0,
+      {
+        v: 1,
+        encoding: 'json',
+        client_id: inferredClientId,
+        frame_id: discordFrameId
+      }
+    ];
+
+    window.parent.postMessage(handshakePayload, '*');
+    if (window.opener) {
+      window.opener.postMessage(handshakePayload, '*');
+    }
+
+    // Also listen for Discord's READY dispatch and respond to PINGs if any
+    window.addEventListener('message', (event) => {
+      if (!Array.isArray(event.data)) return;
+      const [opcode, data] = event.data;
+      if (opcode === 1 && data && data.cmd === 'DISPATCH' && data.evt === 'READY') {
+        const badge = document.getElementById('discord-status-badge');
+        if (badge) {
+          badge.textContent = `Connected inside Discord Activity • Table: ${currentRoomId}`;
+        }
+      }
+    });
+  } catch (err) {
+    console.warn('Discord handshake error:', err);
+  }
 }
 
-const urlParams = new URLSearchParams(window.location.search);
-let currentRoomId = urlParams.get('instance_id') || urlParams.get('room') || 'tavern-1';
+// Fire handshake immediately so Discord hides the 3 pulsing dots right away
+sendDiscordHandshake();
+
+// ============================================================================
+// 2. Built-in Zero-Dependency MQTT-over-WebSockets Client (CSP-safe inside Discord!)
+// ============================================================================
+class MiniMqttClient {
+  constructor(wsUrl, topic, onMessageCallback, onConnectCallback) {
+    this.wsUrl = wsUrl;
+    this.topic = topic;
+    this.onMessageCallback = onMessageCallback;
+    this.onConnectCallback = onConnectCallback;
+    this.ws = null;
+    this.connected = false;
+    this.pingInterval = null;
+    this.packetId = 1;
+    this.connect();
+  }
+
+  encodeLength(len) {
+    const out = [];
+    do {
+      let digit = len % 128;
+      len = Math.floor(len / 128);
+      if (len > 0) digit |= 0x80;
+      out.push(digit);
+    } while (len > 0);
+    return out;
+  }
+
+  encodeUTF8(str) {
+    const bytes = new TextEncoder().encode(str);
+    return [(bytes.length >> 8) & 0xff, bytes.length & 0xff, ...bytes];
+  }
+
+  buildPacket(typeFlags, variableAndPayload) {
+    return new Uint8Array([
+      typeFlags,
+      ...this.encodeLength(variableAndPayload.length),
+      ...variableAndPayload
+    ]);
+  }
+
+  connect() {
+    try {
+      this.ws = new WebSocket(this.wsUrl, 'mqtt');
+      this.ws.binaryType = 'arraybuffer';
+    } catch {
+      return;
+    }
+
+    this.ws.onopen = () => {
+      const clientId = 'dnd_' + Math.random().toString(36).slice(2, 10);
+      const varHeader = [
+        ...this.encodeUTF8('MQTT'),
+        4, // Protocol Level 4 (MQTT 3.1.1)
+        0x02, // Clean Session
+        0x00,
+        0x3c // KeepAlive 60s
+      ];
+      const payload = [...this.encodeUTF8(clientId)];
+      this.ws.send(this.buildPacket(0x10, [...varHeader, ...payload]));
+    };
+
+    this.ws.onmessage = (evt) => {
+      const buf = new Uint8Array(evt.data);
+      if (buf.length < 2) return;
+      const packetType = buf[0] >> 4;
+
+      if (packetType === 2) {
+        // CONNACK -> Subscribe to room topic
+        this.connected = true;
+        this.subscribe(this.topic);
+        if (this.onConnectCallback) this.onConnectCallback();
+        this.pingInterval = setInterval(() => {
+          if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+            this.ws.send(new Uint8Array([0xc0, 0x00])); // PINGREQ
+          }
+        }, 25000);
+      } else if (packetType === 3) {
+        // PUBLISH packet received
+        let multiplier = 1;
+        let remLen = 0;
+        let idx = 1;
+        let encodedByte;
+        do {
+          encodedByte = buf[idx++];
+          remLen += (encodedByte & 127) * multiplier;
+          multiplier *= 128;
+        } while ((encodedByte & 128) !== 0 && idx < buf.length);
+
+        const topicLen = (buf[idx] << 8) | buf[idx + 1];
+        idx += 2 + topicLen;
+
+        const qos = (buf[0] >> 1) & 0x03;
+        if (qos > 0) idx += 2; // Packet Identifier
+
+        const payloadBytes = buf.subarray(idx);
+        const text = new TextDecoder().decode(payloadBytes);
+        if (this.onMessageCallback) {
+          this.onMessageCallback(text);
+        }
+      }
+    };
+
+    this.ws.onclose = () => {
+      this.connected = false;
+      if (this.pingInterval) clearInterval(this.pingInterval);
+      setTimeout(() => this.connect(), 3500);
+    };
+  }
+
+  subscribe(topic) {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+    const pid = this.packetId++;
+    const body = [(pid >> 8) & 0xff, pid & 0xff, ...this.encodeUTF8(topic), 0x00];
+    this.ws.send(this.buildPacket(0x82, body));
+  }
+
+  publish(topic, messageStr) {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN || !this.connected) return;
+    const topicBytes = this.encodeUTF8(topic);
+    const msgBytes = new TextEncoder().encode(messageStr);
+    this.ws.send(this.buildPacket(0x30, [...topicBytes, ...msgBytes]));
+  }
+
+  close() {
+    if (this.pingInterval) clearInterval(this.pingInterval);
+    if (this.ws) {
+      this.ws.onclose = null;
+      this.ws.close();
+    }
+  }
+}
+
+// ============================================================================
+// 3. Session & Room State
+// ============================================================================
+let sessionUserId = null;
+try {
+  sessionUserId = sessionStorage.getItem('dnd_user_id');
+} catch {}
+if (!sessionUserId) {
+  sessionUserId = 'user_' + Math.random().toString(36).slice(2, 9);
+  try {
+    sessionStorage.setItem('dnd_user_id', sessionUserId);
+  } catch {}
+}
+
+// Default table code: use short channel/instance ID if inside Discord, else 'tavern-1'
+let defaultRoomCode = 'tavern-1';
+if (discordChannelId) {
+  defaultRoomCode = 'ch-' + discordChannelId.slice(-6);
+} else if (discordInstanceId) {
+  defaultRoomCode = 'inst-' + discordInstanceId.slice(0, 6);
+} else if (urlParams.get('room')) {
+  defaultRoomCode = urlParams.get('room');
+}
+
+let currentRoomId = defaultRoomCode;
 
 const appState = {
   userId: sessionUserId,
@@ -54,7 +256,7 @@ function createEmptyRoom(roomId) {
 }
 
 // ============================================================================
-// Client-Side Encounter Engine (Used in Serverless / GitHub Pages P2P Mode)
+// 4. Encounter & Initiative Sorting Engine
 // ============================================================================
 function sortCombatants(room) {
   const currentActiveId = room.combatants[room.activeTurnIndex]?.id || null;
@@ -197,7 +399,10 @@ function applyActionToRoom(room, msg) {
 
       for (let i = 0; i < numToCreate; i++) {
         const suffix = numToCreate > 1 ? ` #${i + 1}` : '';
-        const seed = npcSeeds && npcSeeds[i] ? npcSeeds[i] : { id: `npc_${Date.now()}_${i}`, roll: Math.floor(Math.random() * 20) + 1 };
+        const seed =
+          npcSeeds && npcSeeds[i]
+            ? npcSeeds[i]
+            : { id: `npc_${Date.now()}_${i}`, roll: Math.floor(Math.random() * 20) + 1 };
         let initVal = null;
         let rawVal = null;
 
@@ -339,7 +544,7 @@ function applyActionToRoom(room, msg) {
 }
 
 // ============================================================================
-// Web Audio Synthesizer (Zero-external-asset Fantasy Chimes & Horns)
+// 5. Web Audio Synthesizer
 // ============================================================================
 let audioCtx = null;
 
@@ -418,22 +623,29 @@ function playDiceSound() {
 }
 
 // ============================================================================
-// Universal Networking Layer:
-// 1. Tries local Node.js WebSocket (/ws) first if running on localhost
-// 2. Automatically switches to Serverless P2P / Cloud Relay (WSS over port 443/8084)
-//    so GitHub Pages works across Home Wi-Fi, Different Cities, and 4G/5G Mobile Data!
+// 6. Universal Sync Layer (Zero-Dependency MQTT over WSS + Local WS + BroadcastChannel)
 // ============================================================================
 let localWs = null;
 let mqttClient = null;
 let currentTopic = null;
+let localBroadcast = null;
+
+try {
+  localBroadcast = new BroadcastChannel('dnd_tracker_channel');
+  localBroadcast.onmessage = (e) => {
+    if (e.data) handleP2PMessage(e.data);
+  };
+} catch {}
 
 function initNetworkSync(roomCode) {
-  currentRoomId = (roomCode || 'tavern-1').trim().toLowerCase();
-  document.getElementById('sync-badge').textContent = `Table: ${currentRoomId}`;
+  currentRoomId = (roomCode || defaultRoomCode).trim().toLowerCase();
+  const syncBadge = document.getElementById('sync-badge');
+  if (syncBadge) syncBadge.textContent = `Table: ${currentRoomId}`;
 
-  const isGitHubPages = window.location.hostname.endsWith('github.io');
+  const isLocalhost =
+    window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
 
-  if (!isGitHubPages && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1')) {
+  if (isLocalhost) {
     connectLocalWebSocket();
   } else {
     connectServerlessP2PRelay();
@@ -462,8 +674,7 @@ function connectLocalWebSocket() {
     opened = true;
     clearTimeout(fallbackTimer);
     appState.syncMode = 'local-ws';
-    badge.textContent = `Connected (Local Server + P2P Ready) • Table: ${currentRoomId}`;
-    // Also connect serverless P2P relay in parallel so mobile phones on 4G/5G or GitHub Pages can join the same table!
+    if (badge) badge.textContent = `Connected (Local Server + Global P2P) • Table: ${currentRoomId}`;
     connectServerlessP2PRelay(true);
   });
 
@@ -477,75 +688,65 @@ function connectLocalWebSocket() {
         renderUI();
         if (data.event) handleRoomEvent(data.event);
       }
-    } catch (e) {
-      console.error('Failed to parse WS message', e);
-    }
+    } catch {}
   });
 }
 
 function connectServerlessP2PRelay(alsoUsingLocalWs = false) {
   const badge = document.getElementById('discord-status-badge');
-  if (!window.mqtt) {
-    if (!alsoUsingLocalWs) badge.textContent = `Offline Mode • Table: ${currentRoomId}`;
-    return;
-  }
-
   if (mqttClient) {
-    try { mqttClient.end(true); } catch {}
+    mqttClient.close();
   }
 
-  // Automatically route through Discord's URL Mapping (/mqtt-broker) when inside a Discord Activity iframe
   const isDiscordProxy = window.location.hostname.endsWith('.discordsays.com');
   const brokerUrl = isDiscordProxy
     ? `wss://${window.location.host}/mqtt-broker/mqtt`
     : 'wss://broker.emqx.io:8084/mqtt';
-  mqttClient = window.mqtt.connect(brokerUrl, {
-    clientId: 'dnd_' + appState.userId + '_' + Math.random().toString(16).slice(2, 6),
-    clean: true,
-    connectTimeout: 5000,
-    reconnectPeriod: 3000
-  });
 
   currentTopic = `dnd-initiative-tracker-v1/room/${currentRoomId}`;
 
-  mqttClient.on('connect', () => {
-    if (!alsoUsingLocalWs) {
-      appState.syncMode = 'p2p-mqtt';
-      badge.textContent = `⚡ Global P2P Sync Active (Wi-Fi & Mobile Data) • Table: ${currentRoomId}`;
-    } else {
-      badge.textContent = `⚡ Hybrid Sync Active (Local + Global P2P) • Table: ${currentRoomId}`;
-    }
+  if (!alsoUsingLocalWs && badge) {
+    badge.textContent = isDiscordProxy
+      ? `Discord Activity Ready • Table: ${currentRoomId}`
+      : `Connecting Global P2P Sync • Table: ${currentRoomId}`;
+  }
 
-    mqttClient.subscribe(currentTopic, { qos: 0 }, () => {
-      // Request latest state from DM or peers in this room
+  mqttClient = new MiniMqttClient(
+    brokerUrl,
+    currentTopic,
+    (rawText) => {
+      try {
+        const msg = JSON.parse(rawText);
+        handleP2PMessage(msg);
+      } catch {}
+    },
+    () => {
+      if (!alsoUsingLocalWs) {
+        appState.syncMode = 'p2p-mqtt';
+        if (badge) {
+          badge.textContent = `⚡ Global P2P Sync Active • Table: ${currentRoomId}`;
+        }
+      }
       publishP2P({ type: 'REQUEST_SYNC', senderId: appState.userId });
-    });
-  });
-
-  mqttClient.on('message', (_topic, payloadBuffer) => {
-    try {
-      const msg = JSON.parse(payloadBuffer.toString());
-      handleP2PMessage(msg);
-    } catch (e) {
-      console.warn('Invalid P2P payload', e);
     }
-  });
+  );
 }
 
 function publishP2P(payload) {
+  const fullPayload = { ...payload, roomId: currentRoomId, senderId: appState.userId };
   if (mqttClient && mqttClient.connected && currentTopic) {
-    mqttClient.publish(
-      currentTopic,
-      JSON.stringify({ ...payload, roomId: currentRoomId, senderId: appState.userId }),
-      { qos: 0 }
-    );
+    mqttClient.publish(currentTopic, JSON.stringify(fullPayload));
+  }
+  if (localBroadcast) {
+    try {
+      localBroadcast.postMessage(fullPayload);
+    } catch {}
   }
 }
 
 function handleP2PMessage(msg) {
   if (!msg || msg.roomId !== currentRoomId) return;
 
-  // If a new peer joins and asks for current room state, the DM (or any peer with combatants) broadcasts a snapshot
   if (msg.type === 'REQUEST_SYNC') {
     if (msg.senderId !== appState.userId && appState.room.combatants.length > 0) {
       const isDM = appState.role === 'dm' || appState.room.dmUserId === appState.userId;
@@ -554,7 +755,7 @@ function handleP2PMessage(msg) {
           type: 'SYNC_SNAPSHOT',
           state: appState.room
         });
-      }, isDM ? 80 : 350);
+      }, isDM ? 60 : 300);
     }
     return;
   }
@@ -562,7 +763,8 @@ function handleP2PMessage(msg) {
   if (msg.type === 'SYNC_SNAPSHOT') {
     if (
       msg.state &&
-      (appState.room.combatants.length === 0 || (msg.state.updatedAt || 0) > (appState.room.updatedAt || 0))
+      (appState.room.combatants.length === 0 ||
+        (msg.state.updatedAt || 0) > (appState.room.updatedAt || 0))
     ) {
       appState.room = msg.state;
       const { activeCombatant, onDeckCombatant } = getTurnOrderContext(appState.room);
@@ -573,7 +775,6 @@ function handleP2PMessage(msg) {
     return;
   }
 
-  // When running in pure Serverless P2P mode (e.g., on GitHub Pages), apply the action locally
   if (appState.syncMode !== 'local-ws') {
     const evt = applyActionToRoom(appState.room, msg);
     const { activeCombatant, onDeckCombatant } = getTurnOrderContext(appState.room);
@@ -587,7 +788,6 @@ function handleP2PMessage(msg) {
 function sendAction(payload) {
   const stamped = { ...payload, roomId: currentRoomId, timestamp: Date.now() };
 
-  // Pre-generate deterministic NPC IDs & rolls so all P2P peers compute the exact same monster stats
   if (stamped.type === 'ADD_NPC') {
     const count = Math.min(Math.max(Number(stamped.count) || 1, 1), 10);
     stamped.npcSeeds = Array.from({ length: count }, (_, i) => ({
@@ -600,10 +800,8 @@ function sendAction(payload) {
     localWs.send(JSON.stringify(stamped));
   }
 
-  if (mqttClient && mqttClient.connected) {
-    publishP2P(stamped);
-  } else if (appState.syncMode !== 'local-ws') {
-    // Immediate local update even if offline
+  if (appState.syncMode !== 'local-ws') {
+    // Apply immediately on this client so UI is instant even before P2P echo
     const evt = applyActionToRoom(appState.room, stamped);
     const { activeCombatant, onDeckCombatant } = getTurnOrderContext(appState.room);
     appState.activeCombatantId = activeCombatant?.id || null;
@@ -611,10 +809,12 @@ function sendAction(payload) {
     renderUI();
     if (evt) handleRoomEvent(evt);
   }
+
+  publishP2P(stamped);
 }
 
 // ============================================================================
-// Real-Time Notification Handler (Active Turn & On-Deck Alerts)
+// 7. Real-Time Notification Handler (Active Turn & On-Deck Alerts)
 // ============================================================================
 function handleRoomEvent(evt) {
   if (evt.kind === 'INITIATIVE_ROLLED') {
@@ -703,7 +903,7 @@ function sendBrowserNotification(title, body) {
 }
 
 // ============================================================================
-// UI Rendering
+// 8. UI Rendering
 // ============================================================================
 function renderUI() {
   const room = appState.room;
@@ -884,9 +1084,10 @@ function escapeHtml(str) {
 }
 
 // ============================================================================
-// DOM Event Listeners
+// 9. DOM Event Listeners
 // ============================================================================
 window.addEventListener('DOMContentLoaded', () => {
+  sendDiscordHandshake();
   document.getElementById('room-code-input').value = currentRoomId;
   initNetworkSync(currentRoomId);
 
@@ -904,12 +1105,15 @@ window.addEventListener('DOMContentLoaded', () => {
     ensureAudio();
 
     if ('Notification' in window && Notification.permission === 'default') {
-      Notification.requestPermission().catch(() => {});
+      try {
+        Notification.requestPermission().catch(() => {});
+      } catch {}
     }
 
     const selectedRole = document.querySelector('input[name="role"]:checked')?.value || 'player';
     const charName = document.getElementById('character-name-input').value.trim() || 'Adventurer';
-    const newRoomCode = document.getElementById('room-code-input').value.trim().toLowerCase() || 'tavern-1';
+    const newRoomCode =
+      document.getElementById('room-code-input').value.trim().toLowerCase() || defaultRoomCode;
     const dexMod = Number(document.getElementById('join-dex-input').value) || 0;
     const maxHp = Number(document.getElementById('join-hp-input').value) || 30;
     const ac = Number(document.getElementById('join-ac-input').value) || 15;
@@ -986,7 +1190,8 @@ window.addEventListener('DOMContentLoaded', () => {
 
     const resultBox = document.getElementById('last-roll-result');
     document.getElementById('d20-value').textContent = total;
-    document.getElementById('roll-breakdown-text').textContent = `Submitted Physical Roll Total = ${total}`;
+    document.getElementById('roll-breakdown-text').textContent =
+      `Submitted Physical Roll Total = ${total}`;
     resultBox.classList.remove('hidden');
 
     sendAction({
@@ -1082,7 +1287,10 @@ window.addEventListener('DOMContentLoaded', () => {
         updates: { conditions: nextConds }
       });
     } else if (action === 'edit-init') {
-      const newInit = prompt(`Set new Initiative score for ${combatant.name}:`, combatant.initiative ?? 10);
+      const newInit = prompt(
+        `Set new Initiative score for ${combatant.name}:`,
+        combatant.initiative ?? 10
+      );
       if (newInit !== null) {
         sendAction({
           type: 'UPDATE_COMBATANT',
