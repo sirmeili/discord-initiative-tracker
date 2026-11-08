@@ -3,8 +3,8 @@
 // Zero-External-CDN Edition for Discord Embedded Activities + GitHub Pages
 // Includes:
 //  1. Native Discord Embedded App SDK Handshake (dismisses the 3 pulsing dots immediately!)
-//  2. Native MQTT 3.1.1 over WebSocket Client (zero external CDN scripts blocked by Discord CSP!)
-//  3. Works across Home Wi-Fi, Different Cities, and 4G/5G Mobile Data
+//  2. Port-443 HTTPS/WSS Realtime Relay (ntfy.sh) — works through Discord URL Mappings,
+//     Home Wi-Fi, Different Cities, and 4G/5G Mobile Data with ZERO custom ports!
 // ============================================================================
 
 const CONDITIONS_LIST = [
@@ -29,9 +29,6 @@ const discordChannelId = urlParams.get('channel_id');
 function sendDiscordHandshake() {
   if (!discordFrameId) return;
   try {
-    // Opcodes in @discord/embedded-app-sdk: HANDSHAKE = 0, FRAME = 1
-    // Sending HANDSHAKE [0, { v: 1, encoding: 'json', client_id, frame_id }] tells the Discord client
-    // that the Activity DOM is loaded and ready, immediately dismissing the 3 pulsing loading dots!
     const hostParts = window.location.hostname.split('.');
     const inferredClientId =
       urlParams.get('client_id') ||
@@ -51,151 +48,76 @@ function sendDiscordHandshake() {
     if (window.opener) {
       window.opener.postMessage(handshakePayload, '*');
     }
-
-    // Also listen for Discord's READY dispatch and respond to PINGs if any
-    window.addEventListener('message', (event) => {
-      if (!Array.isArray(event.data)) return;
-      const [opcode, data] = event.data;
-      if (opcode === 1 && data && data.cmd === 'DISPATCH' && data.evt === 'READY') {
-        const badge = document.getElementById('discord-status-badge');
-        if (badge) {
-          badge.textContent = `Connected inside Discord Activity • Table: ${currentRoomId}`;
-        }
-      }
-    });
   } catch (err) {
     console.warn('Discord handshake error:', err);
   }
 }
 
-// Fire handshake immediately so Discord hides the 3 pulsing dots right away
 sendDiscordHandshake();
 
 // ============================================================================
-// 2. Built-in Zero-Dependency MQTT-over-WebSockets Client (CSP-safe inside Discord!)
+// 2. Port-443 Pub/Sub Relay Client (Works inside Discord URL Mappings & Mobile Data!)
 // ============================================================================
-class MiniMqttClient {
-  constructor(wsUrl, topic, onMessageCallback, onConnectCallback) {
-    this.wsUrl = wsUrl;
-    this.topic = topic;
+class RealtimeRelayClient {
+  constructor(roomCode, onMessageCallback, onConnectCallback) {
+    this.roomTopic = `dnd_init_tracker_v2_${roomCode.replace(/[^a-zA-Z0-9_-]/g, '_')}`;
     this.onMessageCallback = onMessageCallback;
     this.onConnectCallback = onConnectCallback;
     this.ws = null;
     this.connected = false;
-    this.pingInterval = null;
-    this.packetId = 1;
+    this.closedIntentionally = false;
+
+    const isDiscordProxy = window.location.hostname.endsWith('.discordsays.com');
+    // When inside Discord Activity, route through /sync URL Mapping -> ntfy.sh (standard port 443!)
+    this.baseHttpUrl = isDiscordProxy ? `https://${window.location.host}/sync` : 'https://ntfy.sh';
+    this.baseWsUrl = isDiscordProxy ? `wss://${window.location.host}/sync` : 'wss://ntfy.sh';
+
     this.connect();
   }
 
-  encodeLength(len) {
-    const out = [];
-    do {
-      let digit = len % 128;
-      len = Math.floor(len / 128);
-      if (len > 0) digit |= 0x80;
-      out.push(digit);
-    } while (len > 0);
-    return out;
-  }
-
-  encodeUTF8(str) {
-    const bytes = new TextEncoder().encode(str);
-    return [(bytes.length >> 8) & 0xff, bytes.length & 0xff, ...bytes];
-  }
-
-  buildPacket(typeFlags, variableAndPayload) {
-    return new Uint8Array([
-      typeFlags,
-      ...this.encodeLength(variableAndPayload.length),
-      ...variableAndPayload
-    ]);
-  }
-
   connect() {
+    if (this.closedIntentionally) return;
     try {
-      this.ws = new WebSocket(this.wsUrl, 'mqtt');
-      this.ws.binaryType = 'arraybuffer';
+      this.ws = new WebSocket(`${this.baseWsUrl}/${this.roomTopic}/ws`);
     } catch {
       return;
     }
 
     this.ws.onopen = () => {
-      const clientId = 'dnd_' + Math.random().toString(36).slice(2, 10);
-      const varHeader = [
-        ...this.encodeUTF8('MQTT'),
-        4, // Protocol Level 4 (MQTT 3.1.1)
-        0x02, // Clean Session
-        0x00,
-        0x3c // KeepAlive 60s
-      ];
-      const payload = [...this.encodeUTF8(clientId)];
-      this.ws.send(this.buildPacket(0x10, [...varHeader, ...payload]));
+      this.connected = true;
+      if (this.onConnectCallback) this.onConnectCallback();
     };
 
     this.ws.onmessage = (evt) => {
-      const buf = new Uint8Array(evt.data);
-      if (buf.length < 2) return;
-      const packetType = buf[0] >> 4;
-
-      if (packetType === 2) {
-        // CONNACK -> Subscribe to room topic
-        this.connected = true;
-        this.subscribe(this.topic);
-        if (this.onConnectCallback) this.onConnectCallback();
-        this.pingInterval = setInterval(() => {
-          if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-            this.ws.send(new Uint8Array([0xc0, 0x00])); // PINGREQ
-          }
-        }, 25000);
-      } else if (packetType === 3) {
-        // PUBLISH packet received
-        let multiplier = 1;
-        let remLen = 0;
-        let idx = 1;
-        let encodedByte;
-        do {
-          encodedByte = buf[idx++];
-          remLen += (encodedByte & 127) * multiplier;
-          multiplier *= 128;
-        } while ((encodedByte & 128) !== 0 && idx < buf.length);
-
-        const topicLen = (buf[idx] << 8) | buf[idx + 1];
-        idx += 2 + topicLen;
-
-        const qos = (buf[0] >> 1) & 0x03;
-        if (qos > 0) idx += 2; // Packet Identifier
-
-        const payloadBytes = buf.subarray(idx);
-        const text = new TextDecoder().decode(payloadBytes);
-        if (this.onMessageCallback) {
-          this.onMessageCallback(text);
+      try {
+        const wrapper = JSON.parse(evt.data);
+        if (wrapper && wrapper.event === 'message' && wrapper.message) {
+          this.onMessageCallback(wrapper.message);
         }
-      }
+      } catch {}
     };
 
     this.ws.onclose = () => {
       this.connected = false;
-      if (this.pingInterval) clearInterval(this.pingInterval);
-      setTimeout(() => this.connect(), 3500);
+      if (!this.closedIntentionally) {
+        setTimeout(() => this.connect(), 3000);
+      }
     };
   }
 
-  subscribe(topic) {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
-    const pid = this.packetId++;
-    const body = [(pid >> 8) & 0xff, pid & 0xff, ...this.encodeUTF8(topic), 0x00];
-    this.ws.send(this.buildPacket(0x82, body));
-  }
-
-  publish(topic, messageStr) {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN || !this.connected) return;
-    const topicBytes = this.encodeUTF8(topic);
-    const msgBytes = new TextEncoder().encode(messageStr);
-    this.ws.send(this.buildPacket(0x30, [...topicBytes, ...msgBytes]));
+  async publish(messageStr) {
+    try {
+      await fetch(`${this.baseHttpUrl}/${this.roomTopic}`, {
+        method: 'POST',
+        body: messageStr
+      });
+    } catch (err) {
+      console.warn('Relay publish warning:', err);
+    }
   }
 
   close() {
-    if (this.pingInterval) clearInterval(this.pingInterval);
+    this.closedIntentionally = true;
     if (this.ws) {
       this.ws.onclose = null;
       this.ws.close();
@@ -217,12 +139,10 @@ if (!sessionUserId) {
   } catch {}
 }
 
-// Default table code: use short channel/instance ID if inside Discord, else 'tavern-1'
+// Default table code: use short channel ID if inside Discord, else 'tavern-1'
 let defaultRoomCode = 'tavern-1';
 if (discordChannelId) {
   defaultRoomCode = 'ch-' + discordChannelId.slice(-6);
-} else if (discordInstanceId) {
-  defaultRoomCode = 'inst-' + discordInstanceId.slice(0, 6);
 } else if (urlParams.get('room')) {
   defaultRoomCode = urlParams.get('room');
 }
@@ -235,7 +155,7 @@ const appState = {
   characterName: '',
   role: 'player', // 'player' | 'dm'
   soundEnabled: true,
-  syncMode: 'connecting', // 'local-ws' | 'p2p-mqtt'
+  syncMode: 'connecting', // 'local-ws' | 'cloud-relay'
   room: createEmptyRoom(currentRoomId),
   activeCombatantId: null,
   onDeckCombatantId: null,
@@ -623,32 +543,29 @@ function playDiceSound() {
 }
 
 // ============================================================================
-// 6. Universal Sync Layer (Zero-Dependency MQTT over WSS + Local WS + BroadcastChannel)
+// 6. Universal Sync Layer (Port-443 Cloud Relay + Local WS + BroadcastChannel)
 // ============================================================================
 let localWs = null;
-let mqttClient = null;
-let currentTopic = null;
+let relayClient = null;
 let localBroadcast = null;
+const processedActionIds = new Set();
 
 try {
   localBroadcast = new BroadcastChannel('dnd_tracker_channel');
   localBroadcast.onmessage = (e) => {
-    if (e.data) handleP2PMessage(e.data);
+    if (e.data) handleIncomingMessage(e.data);
   };
 } catch {}
 
 function initNetworkSync(roomCode) {
   currentRoomId = (roomCode || defaultRoomCode).trim().toLowerCase();
-  const syncBadge = document.getElementById('sync-badge');
-  if (syncBadge) syncBadge.textContent = `Table: ${currentRoomId}`;
-
   const isLocalhost =
     window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
 
   if (isLocalhost) {
     connectLocalWebSocket();
   } else {
-    connectServerlessP2PRelay();
+    connectCloudRelay();
   }
 }
 
@@ -658,7 +575,7 @@ function connectLocalWebSocket() {
   try {
     localWs = new WebSocket(`${protocol}//${window.location.host}/ws`);
   } catch {
-    connectServerlessP2PRelay();
+    connectCloudRelay();
     return;
   }
 
@@ -666,7 +583,7 @@ function connectLocalWebSocket() {
   const fallbackTimer = setTimeout(() => {
     if (!opened) {
       localWs.close();
-      connectServerlessP2PRelay();
+      connectCloudRelay();
     }
   }, 1500);
 
@@ -674,8 +591,8 @@ function connectLocalWebSocket() {
     opened = true;
     clearTimeout(fallbackTimer);
     appState.syncMode = 'local-ws';
-    if (badge) badge.textContent = `Connected (Local Server + Global P2P) • Table: ${currentRoomId}`;
-    connectServerlessP2PRelay(true);
+    if (badge) badge.textContent = `Connected (Local + Internet Sync) • Table: ${currentRoomId}`;
+    connectCloudRelay(true);
   });
 
   localWs.addEventListener('message', (event) => {
@@ -692,50 +609,58 @@ function connectLocalWebSocket() {
   });
 }
 
-function connectServerlessP2PRelay(alsoUsingLocalWs = false) {
+function connectCloudRelay(alsoUsingLocalWs = false) {
   const badge = document.getElementById('discord-status-badge');
-  if (mqttClient) {
-    mqttClient.close();
+  const syncBadge = document.getElementById('sync-badge');
+
+  if (relayClient) {
+    relayClient.close();
   }
-
-  const isDiscordProxy = window.location.hostname.endsWith('.discordsays.com');
-  const brokerUrl = isDiscordProxy
-    ? `wss://${window.location.host}/mqtt-broker/mqtt`
-    : 'wss://broker.emqx.io:8084/mqtt';
-
-  currentTopic = `dnd-initiative-tracker-v1/room/${currentRoomId}`;
 
   if (!alsoUsingLocalWs && badge) {
-    badge.textContent = isDiscordProxy
-      ? `Discord Activity Ready • Table: ${currentRoomId}`
-      : `Connecting Global P2P Sync • Table: ${currentRoomId}`;
+    badge.textContent = `Connecting Internet Sync • Table: ${currentRoomId}...`;
+  }
+  if (syncBadge) {
+    syncBadge.textContent = `⏳ Connecting: ${currentRoomId}`;
   }
 
-  mqttClient = new MiniMqttClient(
-    brokerUrl,
-    currentTopic,
+  relayClient = new RealtimeRelayClient(
+    currentRoomId,
     (rawText) => {
       try {
         const msg = JSON.parse(rawText);
-        handleP2PMessage(msg);
+        handleIncomingMessage(msg);
       } catch {}
     },
     () => {
       if (!alsoUsingLocalWs) {
-        appState.syncMode = 'p2p-mqtt';
+        appState.syncMode = 'cloud-relay';
         if (badge) {
-          badge.textContent = `⚡ Global P2P Sync Active • Table: ${currentRoomId}`;
+          badge.textContent = `🌐 Internet Sync LIVE • Table: ${currentRoomId}`;
         }
       }
-      publishP2P({ type: 'REQUEST_SYNC', senderId: appState.userId });
+      if (syncBadge) {
+        syncBadge.textContent = `🌐 Live Table: ${currentRoomId}`;
+        syncBadge.style.color = '#4cd964';
+      }
+      // Ask existing table members (or DM) for the current combat snapshot
+      publishToPeers({ type: 'REQUEST_SYNC', senderId: appState.userId });
     }
   );
 }
 
-function publishP2P(payload) {
-  const fullPayload = { ...payload, roomId: currentRoomId, senderId: appState.userId };
-  if (mqttClient && mqttClient.connected && currentTopic) {
-    mqttClient.publish(currentTopic, JSON.stringify(fullPayload));
+function publishToPeers(payload) {
+  const actionId = payload.actionId || `${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+  const fullPayload = {
+    ...payload,
+    actionId,
+    roomId: currentRoomId,
+    senderId: appState.userId
+  };
+  processedActionIds.add(actionId);
+
+  if (relayClient) {
+    relayClient.publish(JSON.stringify(fullPayload));
   }
   if (localBroadcast) {
     try {
@@ -744,18 +669,18 @@ function publishP2P(payload) {
   }
 }
 
-function handleP2PMessage(msg) {
+function handleIncomingMessage(msg) {
   if (!msg || msg.roomId !== currentRoomId) return;
 
   if (msg.type === 'REQUEST_SYNC') {
     if (msg.senderId !== appState.userId && appState.room.combatants.length > 0) {
       const isDM = appState.role === 'dm' || appState.room.dmUserId === appState.userId;
       setTimeout(() => {
-        publishP2P({
+        publishToPeers({
           type: 'SYNC_SNAPSHOT',
           state: appState.room
         });
-      }, isDM ? 60 : 300);
+      }, isDM ? 80 : 350);
     }
     return;
   }
@@ -775,6 +700,9 @@ function handleP2PMessage(msg) {
     return;
   }
 
+  if (msg.actionId && processedActionIds.has(msg.actionId)) return;
+  if (msg.actionId) processedActionIds.add(msg.actionId);
+
   if (appState.syncMode !== 'local-ws') {
     const evt = applyActionToRoom(appState.room, msg);
     const { activeCombatant, onDeckCombatant } = getTurnOrderContext(appState.room);
@@ -786,7 +714,9 @@ function handleP2PMessage(msg) {
 }
 
 function sendAction(payload) {
-  const stamped = { ...payload, roomId: currentRoomId, timestamp: Date.now() };
+  const actionId = `${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+  const stamped = { ...payload, actionId, roomId: currentRoomId, timestamp: Date.now() };
+  processedActionIds.add(actionId);
 
   if (stamped.type === 'ADD_NPC') {
     const count = Math.min(Math.max(Number(stamped.count) || 1, 1), 10);
@@ -801,7 +731,6 @@ function sendAction(payload) {
   }
 
   if (appState.syncMode !== 'local-ws') {
-    // Apply immediately on this client so UI is instant even before P2P echo
     const evt = applyActionToRoom(appState.room, stamped);
     const { activeCombatant, onDeckCombatant } = getTurnOrderContext(appState.room);
     appState.activeCombatantId = activeCombatant?.id || null;
@@ -810,7 +739,7 @@ function sendAction(payload) {
     if (evt) handleRoomEvent(evt);
   }
 
-  publishP2P(stamped);
+  publishToPeers(stamped);
 }
 
 // ============================================================================
