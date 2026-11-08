@@ -873,19 +873,29 @@ input:focus {
   }
 
   .pip-badge {
-    font-size: 0.7rem;
+    font-size: 0.68rem;
     font-weight: 700;
-    padding: 2px 8px;
+    padding: 2px 7px;
     border-radius: 99px;
     background: rgba(224, 62, 82, 0.2);
     color: #ff8594;
     border: 1px solid rgba(224, 62, 82, 0.4);
   }
 
-  .pip-turn-pill {
-    font-size: 0.7rem;
+  .pip-dm-pill {
+    font-size: 0.65rem;
     font-weight: 800;
-    padding: 2px 9px;
+    padding: 2px 7px;
+    border-radius: 99px;
+    background: rgba(245, 185, 66, 0.2);
+    color: var(--gold);
+    border: 1px solid rgba(245, 185, 66, 0.45);
+  }
+
+  .pip-turn-pill {
+    font-size: 0.68rem;
+    font-weight: 800;
+    padding: 2px 8px;
     border-radius: 99px;
     background: var(--gold);
     color: #111;
@@ -899,17 +909,17 @@ input:focus {
   }
 
   .pip-label {
-    font-size: 0.64rem;
+    font-size: 0.6rem;
     font-weight: 700;
-    letter-spacing: 0.1em;
+    letter-spacing: 0.08em;
     color: var(--gold);
     text-transform: uppercase;
-    margin-bottom: 2px;
+    margin-bottom: 1px;
   }
 
   .pip-active-name {
     font-family: 'Cinzel', serif;
-    font-size: 1.25rem;
+    font-size: 1.1rem;
     font-weight: 800;
     color: #fff;
     white-space: nowrap;
@@ -922,25 +932,48 @@ input:focus {
     justify-content: space-between;
     align-items: center;
     gap: 8px;
-    border-top: 1px solid rgba(255, 255, 255, 0.08);
-    padding-top: 6px;
+    padding-top: 2px;
   }
 
   .pip-ondeck {
     display: flex;
     align-items: center;
-    gap: 6px;
-    font-size: 0.78rem;
+    gap: 5px;
+    font-size: 0.72rem;
     overflow: hidden;
     white-space: nowrap;
     text-overflow: ellipsis;
   }
 
   .pip-ondeck-label {
-    font-size: 0.65rem;
+    font-size: 0.62rem;
     font-weight: 700;
     color: var(--cyan);
-    letter-spacing: 0.06em;
+    letter-spacing: 0.05em;
+  }
+
+  .pip-dm-bar {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    margin-top: 5px;
+    padding-top: 5px;
+    border-top: 1px solid rgba(255, 255, 255, 0.1);
+  }
+
+  .pip-btn {
+    padding: 5px 8px;
+    font-size: 0.78rem;
+    border-radius: 6px;
+  }
+
+  .pip-btn-main {
+    flex: 1;
+    padding: 6px 10px;
+    font-size: 0.78rem;
+    font-weight: 800;
+    border-radius: 6px;
+    letter-spacing: 0.03em;
   }
 
   /* Scale down the full-screen turn alert overlay so it fits inside PiP if triggered while minimized */

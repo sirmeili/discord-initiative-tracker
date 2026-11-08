@@ -48,6 +48,30 @@ function sendDiscordHandshake() {
     if (window.opener) {
       window.opener.postMessage(handshakePayload, '*');
     }
+
+    // Enable interactive buttons inside Discord's minimized Picture-in-Picture (PiP) window!
+    const enableInteractivePip = () => {
+      const setConfigFrame = [
+        1,
+        {
+          cmd: 'SET_CONFIG',
+          args: { use_interactive_pip: true },
+          nonce: 'pip_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6)
+        }
+      ];
+      window.parent.postMessage(setConfigFrame, '*');
+    };
+
+    setTimeout(enableInteractivePip, 300);
+    setTimeout(enableInteractivePip, 1200);
+
+    window.addEventListener('message', (event) => {
+      if (!Array.isArray(event.data)) return;
+      const [opcode, data] = event.data;
+      if (opcode === 1 && data && data.cmd === 'DISPATCH' && data.evt === 'READY') {
+        enableInteractivePip();
+      }
+    });
   } catch (err) {
     console.warn('Discord handshake error:', err);
   }
@@ -901,20 +925,28 @@ function renderUI() {
 
   // Update Compact PiP Mini-HUD (for when Discord minimizes the Activity window)
   const pipRoundBadge = document.getElementById('pip-round-badge');
+  const pipDmBadge = document.getElementById('pip-dm-badge');
   const pipYourTurnPill = document.getElementById('pip-your-turn-pill');
   const pipStatusLabel = document.getElementById('pip-status-label');
   const pipActiveName = document.getElementById('pip-active-name');
   const pipOnDeckName = document.getElementById('pip-ondeck-name');
+  const pipDmControls = document.getElementById('pip-dm-controls');
   const pipNextBtn = document.getElementById('pip-next-turn-btn');
 
   if (pipRoundBadge) {
     pipRoundBadge.textContent = room.combatStarted ? `⚔️ Round ${room.round}` : '🎲 Lobby';
   }
+  if (pipDmBadge) {
+    pipDmBadge.classList.toggle('hidden', !isDM);
+  }
   if (pipYourTurnPill) {
     pipYourTurnPill.classList.toggle('hidden', !isMyTurnNow);
   }
+  if (pipDmControls) {
+    pipDmControls.classList.toggle('hidden', !isDM);
+  }
   if (pipNextBtn) {
-    pipNextBtn.classList.toggle('hidden', !isDM);
+    pipNextBtn.textContent = room.combatStarted ? '⏭️ NEXT TURN' : '⚔️ START';
   }
   if (pipActiveName && pipStatusLabel && pipOnDeckName) {
     if (room.combatStarted && activeCombatant) {
@@ -1178,6 +1210,20 @@ window.addEventListener('DOMContentLoaded', () => {
   if (pipNextBtn) {
     pipNextBtn.addEventListener('click', () => {
       sendAction({ type: 'NEXT_TURN' });
+    });
+  }
+
+  const pipPrevBtn = document.getElementById('pip-prev-turn-btn');
+  if (pipPrevBtn) {
+    pipPrevBtn.addEventListener('click', () => {
+      sendAction({ type: 'PREV_TURN' });
+    });
+  }
+
+  const pipPingBtn = document.getElementById('pip-ping-btn');
+  if (pipPingBtn) {
+    pipPingBtn.addEventListener('click', () => {
+      sendAction({ type: 'PING_ACTIVE_PLAYER' });
     });
   }
 
