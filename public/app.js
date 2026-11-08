@@ -494,8 +494,11 @@ function connectServerlessP2PRelay(alsoUsingLocalWs = false) {
     try { mqttClient.end(true); } catch {}
   }
 
-  // EMQX Public WSS Relay over port 8084 (HTTPS/TLS — works through all Wi-Fi & 4G/5G Mobile Carrier NATs)
-  const brokerUrl = 'wss://broker.emqx.io:8084/mqtt';
+  // Automatically route through Discord's URL Mapping (/mqtt-broker) when inside a Discord Activity iframe
+  const isDiscordProxy = window.location.hostname.endsWith('.discordsays.com');
+  const brokerUrl = isDiscordProxy
+    ? `wss://${window.location.host}/mqtt-broker/mqtt`
+    : 'wss://broker.emqx.io:8084/mqtt';
   mqttClient = window.mqtt.connect(brokerUrl, {
     clientId: 'dnd_' + appState.userId + '_' + Math.random().toString(16).slice(2, 6),
     clean: true,
