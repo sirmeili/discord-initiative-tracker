@@ -1074,6 +1074,15 @@ window.addEventListener('DOMContentLoaded', () => {
     document.getElementById('join-modal').classList.remove('hidden');
   });
 
+  const reloadBtn = document.getElementById('reload-app-btn');
+  if (reloadBtn) {
+    reloadBtn.addEventListener('click', () => {
+      const url = new URL(window.location.href);
+      url.searchParams.set('_cb', Date.now());
+      window.location.replace(url.toString());
+    });
+  }
+
   const soundBtn = document.getElementById('sound-toggle-btn');
   soundBtn.addEventListener('click', () => {
     appState.soundEnabled = !appState.soundEnabled;
