@@ -1,0 +1,10 @@
+{
+  "name": "dnd-initiative-tracker",
+  "version": "1.0.0",
+  "description": "Zero-dependency Real-Time D&D Initiative Tracker Discord Activity",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  }
+}

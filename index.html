@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Roll for Initiative — D&D Turn Tracker</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@600;700;800&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="./style.css" />
+  <!-- MQTT.js browser client for 100% serverless GitHub Pages sync across Wi-Fi & 4G/5G Mobile Data -->
+  <script src="https://unpkg.com/mqtt@5.10.3/dist/mqtt.min.js"></script>
+</head>
+<body>
+  <!-- Full-Screen Turn Alert Overlay -->
+  <div id="turn-alert-overlay" class="turn-overlay hidden">
+    <div class="turn-overlay-card">
+      <div class="turn-overlay-badge" id="alert-badge">⚔️ YOUR TURN!</div>
+      <h1 id="alert-title">It is your turn to act!</h1>
+      <p id="alert-subtitle">Round 1 • The battlefield awaits your command.</p>
+      <button id="dismiss-alert-btn" class="btn btn-gold btn-lg">Got It — Ready to Roll!</button>
+    </div>
+  </div>
+
+  <!-- Top Toast Notification Banner (On-Deck & Pings) -->
+  <div id="toast-container" class="toast-container"></div>
+
+  <!-- Sign-In / Join Table Modal -->
+  <div id="join-modal" class="modal-backdrop">
+    <div class="modal-card">
+      <div class="modal-header">
+        <div class="crest-icon">🎲</div>
+        <h2>Join the Adventuring Party</h2>
+        <p id="discord-status-badge" class="status-pill">Connecting to Real-Time Sync...</p>
+      </div>
+
+      <form id="join-form">
+        <div class="role-selector">
+          <label class="role-option">
+            <input type="radio" name="role" value="player" checked />
+            <div class="role-box">
+              <span class="role-emoji">🛡️</span>
+              <strong>Adventurer (Player)</strong>
+              <small>Roll initiative, track HP & get turn alerts</small>
+            </div>
+          </label>
+          <label class="role-option">
+            <input type="radio" name="role" value="dm" />
+            <div class="role-box">
+              <span class="role-emoji">👑</span>
+              <strong>Dungeon Master</strong>
+              <small>Control turn progression, monsters & order</small>
+            </div>
+          </label>
+        </div>
+
+        <div class="form-row">
+          <div class="form-group" style="flex: 2;">
+            <label for="character-name-input">Character / Display Name</label>
+            <input type="text" id="character-name-input" placeholder="e.g., Shadowheart, Vax, or DM Matt" required />
+          </div>
+          <div class="form-group" style="flex: 1;">
+            <label for="room-code-input" title="Everyone with the same Table Code shares the same board">Table Code</label>
+            <input type="text" id="room-code-input" value="tavern-1" required />
+          </div>
+        </div>
+
+        <div id="player-stats-fields" class="form-row">
+          <div class="form-group">
+            <label for="join-dex-input">Init / DEX Bonus</label>
+            <input type="number" id="join-dex-input" value="2" />
+          </div>
+          <div class="form-group">
+            <label for="join-hp-input">Max HP</label>
+            <input type="number" id="join-hp-input" value="32" min="1" />
+          </div>
+          <div class="form-group">
+            <label for="join-ac-input">Armor Class (AC)</label>
+            <input type="number" id="join-ac-input" value="16" min="1" />
+          </div>
+        </div>
+
+        <button type="submit" class="btn btn-gold btn-block btn-lg">Enter the Tavern ⚔️</button>
+      </form>
+    </div>
+  </div>
+
+  <!-- Main Application Shell -->
+  <div class="app-shell">
+    <!-- Header Bar -->
+    <header class="top-bar">
+      <div class="brand">
+        <span class="brand-logo">🐉</span>
+        <div>
+          <h1>Initiative Tracker</h1>
+          <div class="meta-bar">
+            <span id="round-badge" class="badge badge-round">Pre-Combat Lobby</span>
+            <span id="dm-badge" class="badge badge-dm">DM: Waiting...</span>
+            <span id="sync-badge" class="badge">Table: tavern-1</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="top-actions">
+        <button id="sound-toggle-btn" class="btn btn-ghost btn-sm" title="Toggle Audio Alerts">🔊 Sound: ON</button>
+        <button id="switch-role-btn" class="btn btn-ghost btn-sm">Switch Role / Table</button>
+      </div>
+    </header>
+
+    <!-- Active Turn Spotlight Banner -->
+    <section id="turn-spotlight" class="turn-spotlight">
+      <div class="spotlight-main">
+        <div class="spotlight-label" id="spotlight-status-label">WAITING FOR INITIATIVE ROLLS</div>
+        <div class="spotlight-name" id="spotlight-active-name">Roll your d20 below to join the turn order!</div>
+      </div>
+      <div class="spotlight-ondeck" id="spotlight-ondeck-box">
+        <span class="ondeck-tag">ON DECK NEXT:</span>
+        <strong id="spotlight-ondeck-name">—</strong>
+      </div>
+    </section>
+
+    <!-- Main Grid: Left Controls + Right Initiative Order -->
+    <main class="main-grid">
+      <!-- Left Column: Player Roll Card & DM Command Deck -->
+      <aside class="sidebar">
+        <!-- Player Initiative Roller Card -->
+        <div id="player-roller-card" class="panel-card">
+          <div class="panel-header">
+            <h3>🎲 Roll Your Initiative</h3>
+            <span class="sub-badge" id="my-char-tag">Player</span>
+          </div>
+
+          <div class="roller-controls">
+            <div class="form-row compact">
+              <div class="form-group">
+                <label for="roll-dex-mod">DEX / Init Mod</label>
+                <input type="number" id="roll-dex-mod" value="2" />
+              </div>
+              <div class="form-group">
+                <label for="manual-roll-input">Or Physical Dice Total</label>
+                <input type="number" id="manual-roll-input" placeholder="Optional" />
+              </div>
+            </div>
+
+            <div class="roller-buttons">
+              <button id="roll-d20-btn" class="btn btn-gold btn-lg btn-block">
+                🎲 Roll d20 + Modifier
+              </button>
+              <button id="submit-manual-btn" class="btn btn-secondary btn-block">
+                ✍️ Submit Physical Roll
+              </button>
+            </div>
+
+            <div id="last-roll-result" class="roll-result-box hidden">
+              <div class="d20-circle" id="d20-value">20</div>
+              <div class="roll-breakdown" id="roll-breakdown-text">Natural 20 + 2 = 22</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Dungeon Master Command Deck -->
+        <div id="dm-command-card" class="panel-card dm-panel">
+          <div class="panel-header">
+            <h3>👑 Dungeon Master Controls</h3>
+            <span id="dm-access-tag" class="sub-badge badge-gold">DM Mode</span>
+          </div>
+
+          <!-- Primary Turn Progression Button -->
+          <div class="dm-turn-controls">
+            <button id="next-turn-btn" class="btn btn-crimson btn-xl btn-block">
+              ⏭️ NEXT TURN
+            </button>
+            <div class="dm-sub-buttons">
+              <button id="prev-turn-btn" class="btn btn-secondary btn-sm">⏮️ Prev</button>
+              <button id="ping-player-btn" class="btn btn-secondary btn-sm" title="Re-send visual & sound alert to active player">🔔 Nudge Player</button>
+              <button id="reset-combat-btn" class="btn btn-secondary btn-sm" title="Reset encounter or clear rolls">🔄 Reset</button>
+            </div>
+          </div>
+
+          <hr class="divider" />
+
+          <!-- Add Monster / NPC Form -->
+          <form id="add-npc-form" class="npc-form">
+            <h4>➕ Add Monster / NPC to Order</h4>
+            <div class="form-row compact">
+              <div class="form-group" style="flex:2">
+                <label>Creature Name</label>
+                <input type="text" id="npc-name" placeholder="e.g., Owlbear, Bandit" required />
+              </div>
+              <div class="form-group" style="flex:1">
+                <label>Count</label>
+                <input type="number" id="npc-count" value="1" min="1" max="10" />
+              </div>
+            </div>
+            <div class="form-row compact">
+              <div class="form-group">
+                <label>Init (Blank=Auto d20)</label>
+                <input type="number" id="npc-init" placeholder="Auto" />
+              </div>
+              <div class="form-group">
+                <label>DEX Mod</label>
+                <input type="number" id="npc-dex" value="1" />
+              </div>
+              <div class="form-group">
+                <label>HP</label>
+                <input type="number" id="npc-hp" value="25" />
+              </div>
+              <div class="form-group">
+                <label>AC</label>
+                <input type="number" id="npc-ac" value="13" />
+              </div>
+            </div>
+            <button type="submit" class="btn btn-secondary btn-block">Add Creature(s) to Encounter</button>
+          </form>
+        </div>
+      </aside>
+
+      <!-- Right Column: Live Initiative Order Board -->
+      <section class="board-section">
+        <div class="board-header">
+          <div>
+            <h2>📜 Initiative Order</h2>
+            <p class="board-subtitle">Sorted automatically by Total Initiative (ties broken by DEX modifier)</p>
+          </div>
+          <div class="board-legend">
+            <span class="legend-dot active-dot"></span> Active Turn
+            <span class="legend-dot ondeck-dot"></span> On Deck
+          </div>
+        </div>
+
+        <div id="combatant-list" class="combatant-list">
+          <!-- Populated dynamically -->
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script type="module" src="./app.js"></script>
+</body>
+</html>
