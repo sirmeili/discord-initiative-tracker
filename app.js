@@ -112,7 +112,7 @@ class FirebaseRoomClient {
       : `https://${FIREBASE_DB_HOST}`;
     this.roomUrl = `${this.baseUrl}/rooms/${this.roomKey}.json`;
 
-    this.connect();
+    this.initialLoadPromise = this.connect();
   }
 
   async connect() {
@@ -761,10 +761,22 @@ function handleIncomingMessage(msg) {
   }
 }
 
-function sendAction(payload) {
+async function sendAction(payload) {
   const actionId = `${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
   const stamped = { ...payload, actionId, roomId: currentRoomId, timestamp: Date.now() };
   processedActionIds.add(actionId);
+
+  // Always ensure we have loaded the latest room state from Firebase before applying a JOIN_ROOM or state mutation!
+  if (relayClient && relayClient.initialLoadPromise) {
+    try {
+      await relayClient.initialLoadPromise;
+    } catch {}
+  }
+  if (stamped.type === 'JOIN_ROOM' && relayClient) {
+    try {
+      await relayClient.fetchLatestState();
+    } catch {}
+  }
 
   if (stamped.type === 'ADD_NPC') {
     const count = Math.min(Math.max(Number(stamped.count) || 1, 1), 10);
@@ -1115,7 +1127,7 @@ window.addEventListener('DOMContentLoaded', () => {
     });
   });
 
-  document.getElementById('join-form').addEventListener('submit', (e) => {
+  document.getElementById('join-form').addEventListener('submit', async (e) => {
     e.preventDefault();
     ensureAudio();
 
@@ -1136,13 +1148,17 @@ window.addEventListener('DOMContentLoaded', () => {
     if (newRoomCode !== currentRoomId) {
       appState.room = createEmptyRoom(newRoomCode);
       initNetworkSync(newRoomCode);
+      // Wait for Firebase to download the existing party in newRoomCode BEFORE adding this user!
+      if (relayClient && relayClient.initialLoadPromise) {
+        await relayClient.initialLoadPromise;
+      }
     }
 
     appState.role = selectedRole;
     appState.characterName = charName;
     document.getElementById('roll-dex-mod').value = dexMod;
 
-    sendAction({
+    await sendAction({
       type: 'JOIN_ROOM',
       userId: appState.userId,
       username: appState.username,
