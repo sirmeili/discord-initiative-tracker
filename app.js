@@ -26,13 +26,44 @@ const discordFrameId = urlParams.get('frame_id');
 const discordInstanceId = urlParams.get('instance_id');
 const discordChannelId = urlParams.get('channel_id');
 
+let handshakeSent = false;
+
 function sendDiscordHandshake() {
-  if (!discordFrameId) return;
+  if (!discordFrameId || handshakeSent) return;
+  handshakeSent = true;
   try {
     const hostParts = window.location.hostname.split('.');
     const inferredClientId =
       urlParams.get('client_id') ||
       (window.location.hostname.endsWith('.discordsays.com') ? hostParts[0] : 'discord_activity');
+
+    const sourceOrigin = document.referrer ? new URL(document.referrer).origin : '*';
+
+    const sendSetConfig = () => {
+      const setConfigFrame = [
+        1,
+        {
+          cmd: 'SET_CONFIG',
+          args: { use_interactive_pip: true },
+          nonce:
+            typeof crypto !== 'undefined' && crypto.randomUUID
+              ? crypto.randomUUID()
+              : 'pip_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8)
+        }
+      ];
+      window.parent.postMessage(setConfigFrame, sourceOrigin);
+      if (sourceOrigin !== '*') {
+        window.parent.postMessage(setConfigFrame, '*');
+      }
+    };
+
+    window.addEventListener('message', (event) => {
+      if (!Array.isArray(event.data)) return;
+      const [opcode, data] = event.data;
+      if (opcode === 1 && data && data.cmd === 'DISPATCH' && data.evt === 'READY') {
+        sendSetConfig();
+      }
+    });
 
     const handshakePayload = [
       0,
@@ -44,34 +75,14 @@ function sendDiscordHandshake() {
       }
     ];
 
-    window.parent.postMessage(handshakePayload, '*');
-    if (window.opener) {
-      window.opener.postMessage(handshakePayload, '*');
+    window.parent.postMessage(handshakePayload, sourceOrigin);
+    if (sourceOrigin !== '*') {
+      window.parent.postMessage(handshakePayload, '*');
     }
 
-    // Enable interactive buttons inside Discord's minimized Picture-in-Picture (PiP) window!
-    const enableInteractivePip = () => {
-      const setConfigFrame = [
-        1,
-        {
-          cmd: 'SET_CONFIG',
-          args: { use_interactive_pip: true },
-          nonce: 'pip_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6)
-        }
-      ];
-      window.parent.postMessage(setConfigFrame, '*');
-    };
-
-    setTimeout(enableInteractivePip, 300);
-    setTimeout(enableInteractivePip, 1200);
-
-    window.addEventListener('message', (event) => {
-      if (!Array.isArray(event.data)) return;
-      const [opcode, data] = event.data;
-      if (opcode === 1 && data && data.cmd === 'DISPATCH' && data.evt === 'READY') {
-        enableInteractivePip();
-      }
-    });
+    // Fallback in case READY arrived before listener attached
+    setTimeout(sendSetConfig, 500);
+    setTimeout(sendSetConfig, 1500);
   } catch (err) {
     console.warn('Discord handshake error:', err);
   }
